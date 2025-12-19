@@ -1,6 +1,6 @@
+import pandas as pd
 import duckdb
 import polars as pl
-import pandas as pd
 
 con = duckdb.connect()
 
@@ -49,7 +49,7 @@ df_final = df_final.with_columns([
     ).alias("Running_Ending_Balance")
 ])
 
-# 6. export to csv for Power BI
+# export to csv for Power BI
 final_pandas_df = df_final.to_pandas()
 final_pandas_df.to_csv("Master_AstraZeneca_Data.csv", index=False)
 print("Process Complete! Your Master CSV is ready for Power BI.")

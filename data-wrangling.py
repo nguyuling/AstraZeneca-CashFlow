@@ -1,48 +1,70 @@
-import duckdb
 import polars as pl
-import pandas as pd
 
-# setup DuckDB Connection
-con = duckdb.connect()
+# 1. load files
+main = pl.scan_csv(
+    "Data-Main.csv", 
+    schema_overrides={
+        "Document Header Text": pl.String,
+        "DocumentNo": pl.String,
+        "Assignment": pl.String,
+        "Reference": pl.String,
+        "Amount in USD": pl.String,
+        "Amt in loc.cur.": pl.String,
+        "Amount in doc. curr.": pl.String,
+    },
+    infer_schema_length=10000 
+)
+balance = pl.scan_csv("Data-CashBalance.csv")
+linkage = pl.scan_csv("Others-CategoryLinkage.csv").rename({"Category": "Flow_Direction"})
+mapping = pl.scan_csv("Others-CountryMapping.csv")
 
-# join 3 others.csv into main.csv
-master_query = """
-SELECT 
-    m."File-Month Name", 
-    m."Psing Date", 
-    m."Amount in USD", 
-    m.Category,
-    c.Country,
-    l."ID Category Cat Order" AS Category_Detail,
-    b."Carryforward Balance (USD)" AS Starting_Balance
-FROM 'Data - Main.csv' m
-LEFT JOIN 'Others - Country Mapping.csv' c ON m."File-Month Name" = c.Code
-LEFT JOIN 'Others - Category Linkage.csv' l ON m.Category = l."Category Names"
-LEFT JOIN 'Data - Cash Balance.csv' b ON m."File-Month Name" = b.Name
-"""
-
-# execute the sql using DuckDB and load into Polars DataFrame
-df = con.execute(master_query).pl()
-
-# standardize dates and create weekly buckets
-# calculate the running cash balance per entity
-df_processed = (
-    df
+df_final = (
+    main
+    # joins
+    .join(mapping, left_on="Name", right_on="Code", how="left")
+    .join(linkage, left_on="Category", right_on="Category Names", how="left")
+    .join(balance, left_on="Name", right_on="Name", how="left")
+    
+    # data cleaning
     .with_columns([
-        pl.col("Psing Date").str.to_date("%m/%d/%y").alias("Date"),
+        # clean currency and cast to numbers
+        pl.col("Amount in USD").str.replace_all(",", "").cast(pl.Float64),
+        pl.col("Carryforward Balance (USD)").str.strip_chars().str.replace_all(",", "").cast(pl.Float64),
+        
+        # parse date
+        pl.col("Pstng Date").str.to_date("%m/%d/%Y").alias("Date")
     ])
+    
+    # calculations
     .with_columns([
         pl.col("Date").dt.truncate("1w").alias("Forecast_Week")
     ])
-    .sort(["File-Month Name", "Date"])
+    .sort(["Name", "Date"])
     .with_columns([
-        # Running Balance = Carryforward + Cumulative Sum of Net Cash Flow
-        (pl.col("Starting_Balance") + 
-         pl.col("Amount in USD").cum_sum().over("File-Month Name")
+        (pl.col("Carryforward Balance (USD)") + 
+         pl.col("Amount in USD").cum_sum().over("Name")
         ).alias("Ending_Cash_Balance")
     ])
+    
+    # select only useful columns
+    .select([
+        "Name",                     # Entity Code (TW10 etc)
+        "Country",                  # From Mapping
+        "Date",                     # Cleaned Posting Date
+        "Forecast_Week",            # Weekly buckets for 6-month forecast
+        "Amount in USD",            # Net Cash Flow
+        "Category",                 # Transaction category (AP, AR, etc)
+        "Flow_Direction",           # Inflow vs Outflow
+        "Ending_Cash_Balance",      # The most important KPI
+        "DocumentNo",               # For Anomaly Detection
+        "Document Header Text",     # For Storytelling/Anomalies
+        "Reference",                # For Reconciliation
+        "Assignment"                # For Reconciliation
+    ])
+    
+    .collect()
 )
 
-# export the final DataFrame to .csv for Power BI
-df_processed.to_pandas().to_csv("AstraZeneca_Master_Data.csv", index=False)
-print("Process Complete. Optimized CSV generated for Power BI.")
+# final export
+df_final.write_csv("AstraZeneca_Master_Data.csv")
+print("Success! The lean Master Data file is ready for Power BI.")
